@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dreamly5 LIVE TV</title>
+<style>
+:root{--bg:#0e1013;--p:#181b21;--l:#262a33;--f:#eef0f4;--m:#8b93a1;--a:#2bc5b4;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--f);font:14px system-ui,sans-serif}
+.wrap{max-width:1100px;margin:auto;padding:10px}
+.screen{position:relative;background:#000;border-radius:10px;overflow:hidden;aspect-ratio:16/9}
+video{width:100%;height:100%;background:#000}
+.msg{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;background:#000c;text-align:center;padding:12px}
+.msg.hide{display:none}.msg b{font-size:20px;letter-spacing:2px}
+.bar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+select,input,button{background:var(--p);color:var(--f);border:1px solid var(--l);border-radius:8px;padding:8px 10px;font:inherit}
+input{flex:1;min-width:140px}
+.head{display:flex;align-items:center;gap:10px;margin:10px 0}.head img{height:36px}.head h2{margin:0;font-size:17px;flex:1}
+.chips{display:flex;gap:6px;overflow-x:auto;padding-bottom:6px}.chips button{white-space:nowrap}.chips .on{background:var(--a);color:#04201d;border:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;margin-top:8px}
+.ch{background:var(--p);border:1px solid var(--l);border-radius:10px;padding:8px;text-align:center;cursor:pointer}
+.ch.on{border-color:var(--a)}.ch img{width:64px;height:64px;object-fit:contain}.ch span{display:block;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="screen">
+    <video id="v" controls playsinline autoplay></video>
+    <div class="msg" id="msg"><b>NO SIGNAL</b><span id="txt">Loading channels…</span></div>
+  </div>
+  <div class="bar">
+    <select id="src" title="Source"></select>
+    <select id="q" title="Quality"><option value="-1">Quality: Auto</option></select>
+    <select id="lang" title="Language"><option value="">All languages</option></select>
+    <input id="s" type="search" placeholder="Search channels">
+  </div>
+  <div class="head"><img src="https://i.ibb.co/TB2wVJ5r/Dreamly5livetv.png" alt="" onerror="this.remove()"><h2>Dreamly5 LIVE TV</h2><span id="count">0 channels</span></div>
+  <div class="chips" id="chips"></div>
+  <div class="grid" id="grid"></div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js"></script>
+<script>
+/* ============ CONFIG: put your playlist files / URLs here ============ */
+const SOURCES = [
+  { name: 'Main', url: '/channels.m3u' }      // add more: { name:'Backup', url:'https://example.com/list.m3u' }
+]
+/* ===================================================================== */
+const $ = (id) => document.getElementById(id)
+const v = $('v'); let hls, all = [], cat = 'All', cur = null
+const px = (u) => '/proxy?url=' + encodeURIComponent(u)
+const status = (t, show = true) => { $('txt').textContent = t; $('msg').classList.toggle('hide', !show) }
+
+// ---- M3U parser (EXTINF attrs: tvg-logo, group-title, tvg-language) ----
+function parseM3U(text) {
+  const out = []; let meta = null
+  for (const raw of text.split(/\r?\n/)) {
+    const l = raw.trim()
+    if (l.startsWith('#EXTINF')) {
+      const at = (k) => (l.match(new RegExp(k + '="([^"]*)"', 'i')) || [])[1] || ''
+      meta = { name: l.split(',').pop().trim() || 'Channel', logo: at('tvg-logo'), group: at('group-title') || 'Other', lang: at('tvg-language') }
+    } else if (l && !l.startsWith('#') && meta) { out.push({ ...meta, url: l }); meta = null }
+  }
+  return out
+}
+
+// load a playlist: direct first, then through the proxy (fixes CORS / http mixed content)
+async function loadPlaylist(url) {
+  for (const u of [url, px(url)]) {
+    try {
+      const r = await fetch(u); if (!r.ok) continue
+      const t = await r.text()
+      if (t.trim().startsWith('<')) continue            // got an HTML page, not a playlist
+      const list = t.trim().startsWith('[') ? JSON.parse(t) : parseM3U(t)
+      if (list.length) return list
+    } catch {}
+  }
+  throw new Error('Could not load playlist: ' + url)
+}
+
+// ---- playback with automatic proxy fallback ----
+function play(ch, viaProxy = false) {
+  cur = ch; render(); status('Loading ' + ch.name + '…')
+  if (hls) { hls.destroy(); hls = null }
+  const url = viaProxy || ch.url.startsWith('http://') ? px(ch.url) : ch.url   // http:// is blocked on https pages
+  const fail = () => viaProxy ? status('Channel failed to load. Please try another channel.') : play(ch, true)
+  const isHls = /\.m3u8|\/hls\/|type=m3u8/i.test(ch.url) || !/\.(mp4|webm|mp3|aac)(\?|$)/i.test(ch.url)
+  if (isHls && window.Hls && Hls.isSupported()) {
+    hls = new Hls({ enableWorker: true })
+    hls.loadSource(url); hls.attachMedia(v)
+    hls.on(Hls.Events.MANIFEST_PARSED, (_, d) => {
+      $('q').innerHTML = '<option value="-1">Quality: Auto</option>' + d.levels.map((x, i) => `<option value="${i}">${x.height ? x.height + 'p' : Math.round(x.bitrate / 1000) + 'k'}</option>`).join('')
+      v.play().catch(() => {}); status('', false)
+    })
+    hls.on(Hls.Events.ERROR, (_, e) => { if (e.fatal) { hls.destroy(); hls = null; fail() } })
+  } else {
+    v.src = url; v.onerror = fail; v.onplaying = () => status('', false); v.play().catch(() => {})   // Safari native HLS / mp4
+  }
+}
+$('q').onchange = (e) => { if (hls) hls.currentLevel = +e.target.value }
+
+// ---- UI ----
+function render() {
+  const s = $('s').value.toLowerCase(), lg = $('lang').value
+  const list = all.filter((c) => (cat === 'All' || c.group === cat) && (!lg || c.lang === lg) && c.name.toLowerCase().includes(s))
+  $('count').textContent = list.length + ' channels'
+  $('grid').innerHTML = ''
+  list.forEach((c) => {
+    const d = document.createElement('div'); d.className = 'ch' + (cur === c ? ' on' : '')
+    d.innerHTML = `<img loading="lazy" alt="" src="${c.logo || ''}" onerror="this.style.visibility='hidden'"><span></span>`
+    d.querySelector('span').textContent = c.name
+    d.onclick = () => play(c); $('grid').appendChild(d)
+  })
+}
+function build() {
+  const groups = ['All', ...new Set(all.map((c) => c.group))]
+  $('chips').innerHTML = ''
+  groups.forEach((g) => { const b = document.createElement('button'); b.textContent = g; b.className = g === cat ? 'on' : ''; b.onclick = () => { cat = g; build() }; $('chips').appendChild(b) })
+  const langs = [...new Set(all.map((c) => c.lang).filter(Boolean))].sort()
+  const keep = $('lang').value
+  $('lang').innerHTML = '<option value="">All languages</option>' + langs.map((l) => `<option>${l}</option>`).join(''); $('lang').value = keep
+  render()
+}
+async function loadSource(i) {
+  status('Loading channels…')
+  try { all = await loadPlaylist(SOURCES[i].url); cat = 'All'; build(); status('Select a channel to start') }
+  catch (e) { all = []; build(); status(e.message + ' — check the playlist path/CORS (see README).') }
+}
+SOURCES.forEach((s, i) => $('src').add(new Option(s.name, i)))
+$('src').onchange = (e) => loadSource(+e.target.value)
+$('s').oninput = render; $('lang').onchange = render
+loadSource(0)
+</script>
+</body>
+</html>
